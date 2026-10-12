@@ -483,3 +483,26 @@ PASS healthz / mobile dir 未配置时 503
 8. 200 并发配对压测 10 分钟：p95 <100ms，内存平稳。
 9. 日志审计 grep 不到 secret/hash/完整 sid。
 10. `--static-root` 托管 mobile app，SPA 深链不 404。
+11. 只发 `auth_init`、未完成 `auth_response` 的 socket 发 `data` → `AUTH_FAILED` + 关闭，对端收不到该帧；
+    合法配对不受影响。
+12. 未完成鉴权的 socket 发 `pair_status_query` / `device_unregister` → `AUTH_FAILED` + 关闭；配对不续期、不被删除。
+13. 已鉴权 mobile 发 `device_unregister` → `AUTH_FAILED` + 关闭，桌面配对保留；device 只能注销自己的 sid。
+14. 同一 sid 上其他连接的 `auth_init` 不会覆盖正在鉴权连接的挑战，后者 `auth_response` 仍成功。
+15. 畸形百分号编码请求（如 `GET /%`）→ 400，进程存活；静态处理未预期异常 → 500，不挂起、不退出。
+    桌面 LAN 端点的移动页托管同此语义。
+
+### A.4 relay 鉴权状态（每条 socket）
+
+```text
+unauthenticated ──auth_init(sid 有效)──▶ pending{entry, role, nonce(本 socket 独占, TTL 60s)}
+pending ──auth_response(proof 正确, sid 一致, 配对仍在)──▶ authenticated{entry, role}（bindRole）
+pending ──auth_response 失败──▶ AUTH_FAILED + 关闭（nonce 一次性，成败均作废）
+authenticated ──被互踢 / 被同角色替换 / 配对 drop──▶ 失效（以 entry.<role> === 本 socket 判定）
+```
+
+- 状态所有者：relay 进程内每条 socket 的闭包状态；配对注册表只持有 sid↔passHash 与各角色当前绑定的 socket，
+  不再持有 nonce。
+- 只有 authenticated 可发 `data` / `pair_status_query`（sid 须与自身一致）；`device_unregister` 额外要求
+  role = device 且 sid 为自身。其余情况一律 `AUTH_FAILED` + 关闭（fail-closed）。
+- 已 authenticated 的 socket 再发 `auth_init` → `WRONG_PARAM` + 关闭：一条 socket 只绑定一个身份。
+- 静态托管路径须解码成功（否则 400），并解析到静态根 + 路径分隔符之内（否则 403）。

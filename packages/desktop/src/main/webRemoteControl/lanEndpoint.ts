@@ -398,13 +398,24 @@ export class LanRemoteControlEndpoint {
       );
       return;
     }
-    void this.staticHandler(url.pathname).then((result) => {
-      res.writeHead(result.status, {
-        "content-type": result.contentType ?? "text/plain; charset=utf-8",
-        "cache-control": "no-store",
+    void this.staticHandler(url.pathname)
+      .then((result) => {
+        res.writeHead(result.status, {
+          "content-type": result.contentType ?? "text/plain; charset=utf-8",
+          "cache-control": "no-store",
+        });
+        res.end(result.body ?? "");
+      })
+      .catch((error: unknown) => {
+        // 修复说明：原链路没有 catch，静态处理抛错时请求永远不回包（连接挂起）；兜底回 500。
+        this.options.logger.warn("[web-remote-control] static handler failed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
+        if (!res.headersSent) {
+          res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
+        }
+        res.end();
       });
-      res.end(result.body ?? "");
-    });
   }
 
   private sweepIdlePairs(): void {

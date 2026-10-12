@@ -17,10 +17,22 @@ export interface RelayPairEntry {
   passHash: string;
   device?: WebSocket;
   mobile?: WebSocket;
-  nonce?: { value: string; role: "device" | "mobile"; expiresAt: number };
   pairStatus: "waiting" | "matched";
   lastSeenAt: number;
   refreshAt: number;
+}
+
+/**
+ * 一次性鉴权挑战，由发起 auth_init 的那条 socket 自己持有。
+ *
+ * 修复说明：挑战原先挂在 RelayPairEntry 上（每个 sid 只有一个 nonce），任何知道 sid 的连接
+ * 反复发 auth_init 都能覆盖正在鉴权的合法连接的 nonce，令其 auth_response 失败。
+ * 改为按 socket 存放后，各连接的挑战互不干扰。
+ */
+export interface RelayAuthChallenge {
+  value: string;
+  role: "device" | "mobile";
+  expiresAt: number;
 }
 
 export type RelayLogger = {
@@ -71,19 +83,23 @@ export class RelayPairingRegistry {
     return deviceSid;
   }
 
-  issueChallenge(entry: RelayPairEntry, role: "device" | "mobile"): string {
-    const nonce = randomBytes(16).toString("base64url");
-    entry.nonce = { value: nonce, role, expiresAt: Date.now() + NONCE_TTL_MS };
-    return nonce;
+  issueChallenge(role: "device" | "mobile"): RelayAuthChallenge {
+    return {
+      value: randomBytes(16).toString("base64url"),
+      role,
+      expiresAt: Date.now() + NONCE_TTL_MS,
+    };
   }
 
-  /** 校验 proof = HMAC-SHA256(passHash, `${nonce}|${role}|${deviceSid}`)。 */
-  verifyProof(entry: RelayPairEntry, role: "device" | "mobile", proof: string): boolean {
-    const nonce = entry.nonce;
-    if (!nonce || nonce.role !== role || nonce.expiresAt <= Date.now()) {
+  /**
+   * 校验 proof = HMAC-SHA256(passHash, `${nonce}|${role}|${deviceSid}`)。
+   * 挑战一次性：调用方无论成败都必须丢弃 challenge。
+   */
+  verifyProof(entry: RelayPairEntry, nonce: RelayAuthChallenge, proof: string): boolean {
+    if (nonce.expiresAt <= Date.now()) {
       return false;
     }
-    entry.nonce = undefined;
+    const role = nonce.role;
     const expected = createHmac("sha256", entry.passHash)
       .update(`${nonce.value}|${role}|${entry.deviceSid}`)
       .digest("base64url");
