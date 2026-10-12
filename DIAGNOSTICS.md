@@ -45,7 +45,7 @@ pnpm dev:desktop
 
 新增事件和指标先修改 `.agents/specs/local-diagnostics.md` 与 `packages/shared/src/diagnostics.ts` 的固定字段。调用现有 logger，并在 console、文件、IPC 边界使用 `safeLogArgs`。自由文本和业务身份不能绕过过滤。
 
-静态消息目录由源码生成，修改日志文字后执行：
+静态消息目录由源码生成，只扫描 git 已跟踪或未被忽略的源码文件，本地构建产物不会进入目录。`scripts/ci/diagnostic-log-catalog.test.mjs` 会校验已提交目录与源码逐项一致，目录过期时 CI 失败。修改日志文字后执行：
 
 ```bash
 node scripts/diagnostic-log-catalog.mjs
