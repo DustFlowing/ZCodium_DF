@@ -392,13 +392,15 @@ export function createHttpServer(
         rawBody = { payload: rawBodyText };
       }
     }
-    const webhookSecret = c.req.header("x-zcode-bot-secret");
     const botId = c.req.param("botId");
     const result = await botsService.handleProviderCallbackResponse(provider, {
       ...(typeof rawBody === "object" && rawBody !== null ? rawBody : { payload: rawBody }),
       rawBody: rawBodyText,
       ...(botId ? { botId } : {}),
-      ...(webhookSecret ? { webhookSecret } : {}),
+      // Bugfix（安全）：旧实现只在带了 x-zcode-bot-secret 时才覆盖 webhookSecret，没有 header 时
+      // 请求体自带的 webhookSecret 会被当成凭据沿用。secret 只允许走请求头：这里无条件用真实请求头
+      // 覆盖同名字段，由 BotsService 按 Bot 配置的认证 Header 名取值并做常量时间比较。
+      zcodeWebhookHeaders: c.req.header(),
     });
     const responseBody = result.responseBody ?? { ok: result.ok, replies: result.replies };
     if (result.status === 400) {

@@ -17,6 +17,7 @@ const messages = {
     workspaceOutOfScope: "当前聊天上下文的 workspace 已不在授权范围内，请重新选择 **/项目**。",
     bindCodeInvalid: "绑定码无效或已过期，请在 zcode UI 重新生成。",
     bindBotMissing: "绑定失败：bot 不存在。",
+    bindTooManyAttempts: "绑定码尝试次数过多，请 {minutes} 分钟后再试。",
     bindSuccess: "绑定成功。发送 **/帮助** 查看可用命令。",
     weixinActivatedWelcome: "微信 Bot 已激活。发送 **/帮助** 查看命令，或直接描述你要做的事。",
     helpTitle: "ZCode 机器人命令：",
@@ -139,6 +140,7 @@ const messages = {
       "The workspace in this chat is no longer authorized. Please select **/workspace** again.",
     bindCodeInvalid: "The bind code is invalid or expired. Generate a new one in the zcode UI.",
     bindBotMissing: "Bind failed: bot does not exist.",
+    bindTooManyAttempts: "Too many bind attempts. Try again in {minutes} minute(s).",
     bindSuccess: "Bound successfully. Send **/help** to see available commands.",
     weixinActivatedWelcome:
       "Weixin bot is active. Send **/help** to see commands, or describe what you want to do.",

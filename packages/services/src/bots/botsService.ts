@@ -1,6 +1,6 @@
 /* eslint-disable max-lines -- Bots 服务仍复用原 RPC 文件名，先把鉴权、命令路由、ZCode Agent 桥接收口集中在同一服务内。 */
 import { Buffer } from "node:buffer";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { IDisposable } from "@zcode/rpc";
@@ -130,6 +130,14 @@ import {
   normalizeBotConfig,
   normalizeConfigBots,
 } from "./botConfigHelpers.js";
+import {
+  constantTimeEquals,
+  createBindAttemptLimiter,
+  createBindCodeValue,
+  formatInboundMessageLogSummary,
+  normalizeBindCode,
+  readWebhookInboundSecret,
+} from "./botCallbackSecurity.js";
 import {
   firstAllowedWorkspace,
   createWorkspaceRef,
@@ -395,10 +403,6 @@ function summarizeCallbackPayload(payload: unknown): string {
     `chatType=${readNestedString(message, "chat_type") ?? readNestedString(context, "chat_type") ?? readNestedString(payload, "chat_type") ?? "none"}`,
     `hasAction=${action ? "true" : "false"}`,
   ].join(" ");
-}
-
-function createCode(): string {
-  return randomBytes(3).toString("hex").toUpperCase();
 }
 
 function normalizeText(value: string): string {
@@ -684,6 +688,7 @@ export function createBotsService(
   const runStartupBackgroundTasks = deps.runStartupBackgroundTasks !== false;
   const repo = new BotsRepo();
   const bindCodes = new Map<string, BindCodeRecord>();
+  const bindAttemptLimiter = createBindAttemptLimiter();
   const automationDeliveryWarningAtByKey = new Map<string, number>();
   const streamSubscriptions = new Map<string, IDisposable>();
   const streamingCardRequestControllers = new Set<AbortController>();
@@ -2558,6 +2563,41 @@ export function createBotsService(
     const locale = await readMessageLocale();
     const config = await repo.readConfig();
     const callbackBot = findCallbackBot(config, provider, payload);
+    if (provider === "webhook") {
+      // Bugfix（安全）：webhook 的发送者身份 providerUserId 完全来自请求体，secret 是唯一的来源凭证。
+      // 旧实现只在 bot.webhookSecretRef 存在且凭据非空时才比较，未配置 secret、凭据读出为空、
+      // 或 botId 指向其他 provider 的 Bot 时都会直接放行（fail-open）。这里改为在解析消息之前
+      // 统一 fail-closed：目标必须是已配置非空 secret 的 webhook Bot，且请求头 secret 常量时间相等。
+      const expectedSecret =
+        callbackBot?.provider === "webhook" && callbackBot.webhookSecretRef
+          ? await deps.credentialService.load(callbackBot.webhookSecretRef).catch(() => null)
+          : null;
+      const rejectReason =
+        callbackBot?.provider !== "webhook"
+          ? "bot-not-webhook"
+          : !expectedSecret
+            ? "secret-not-configured"
+            : constantTimeEquals(
+                  expectedSecret,
+                  readWebhookInboundSecret(payload, callbackBot.webhookAuthHeaderName),
+                )
+              ? null
+              : "secret-mismatch";
+      if (rejectReason) {
+        // 拒绝原因只进日志；响应体保持一致，不让调用方探测 Bot 是否存在或是否配置了 secret。
+        // 请求里的 botId 由发送方构造，只有命中真实 webhook Bot 时才记录。
+        botsLogger.warn(
+          undefined,
+          `webhook callback rejected bot=${callbackBot?.provider === "webhook" ? callbackBot.id : "unknown"} reason=${rejectReason}`,
+        );
+        return {
+          ok: false,
+          replies: [],
+          responseBody: { ok: false, error: msg(locale, "webhookSecretInvalid") },
+          status: 401,
+        };
+      }
+    }
     const preparedPayload = callbackBot
       ? ((await adapter.prepareCallbackPayload?.(callbackBot, payload).catch((error: unknown) => ({
           zcodeCallbackPrepareError: error instanceof Error ? error.message : String(error),
@@ -2600,19 +2640,9 @@ export function createBotsService(
     }
     const replies: BotOutboundMessage[] = [];
     let hadBusinessFailure = false;
-    const inboundSecret =
-      isRecord(preparedPayload) && typeof preparedPayload.webhookSecret === "string"
-        ? preparedPayload.webhookSecret
-        : undefined;
     for (const inbound of parsedInboundMessages) {
       const bot = findBot(config, inbound.botId);
-      if (bot?.provider === "webhook" && bot.webhookSecretRef) {
-        const expectedSecret = await deps.credentialService.load(bot.webhookSecretRef);
-        if (expectedSecret && expectedSecret !== inboundSecret) {
-          replies.push(createOutbound(inbound.actor, msg(locale, "webhookSecretInvalid")));
-          continue;
-        }
-      }
+      // webhook 的 secret 已在函数入口统一校验（fail-closed），这里不再逐条比较。
       if (bot && isFeishuBotProvider(bot.provider) && bot.webhookSecretRef) {
         const expectedToken = await deps.credentialService.load(bot.webhookSecretRef);
         const payloadHeader =
@@ -2625,7 +2655,9 @@ export function createBotsService(
             : typeof payloadHeader?.token === "string"
               ? payloadHeader.token
               : undefined;
-        if (expectedToken && expectedToken !== inboundToken) {
+        // 飞书事件只经 WebSocket 长连接进入，来源由 app 凭据保证；verification token 是可选的
+        // 附加校验，保持“配置了才校验”，仅把比较改为常量时间。
+        if (expectedToken && !constantTimeEquals(expectedToken, inboundToken)) {
           replies.push(createOutbound(inbound.actor, msg(locale, "webhookSecretInvalid")));
           continue;
         }
@@ -2658,10 +2690,9 @@ export function createBotsService(
         );
         continue;
       }
-      botsLogger.info(
-        undefined,
-        `provider callback provider=${provider} bot=${inboundMessage.botId} user=${inboundMessage.actor.providerUserId} displayName=${inboundMessage.actor.displayName ?? ""} text=${inboundMessage.text}`,
-      );
+      // Bugfix：旧日志把消息正文和 displayName 拼进 info 级别，违反“日志不写真实用户数据”。
+      // 调用点只传标识与长度；不另加带原文的 debug 日志，日志 sink 对 debug 同样没有隐私例外。
+      botsLogger.info(undefined, formatInboundMessageLogSummary(provider, inboundMessage));
       let outbound: BotOutboundMessage[];
       let reconnectStartingReply: BotOutboundMessage | null = null;
       let inboundBusinessFailure = false;
@@ -4549,8 +4580,21 @@ export function createBotsService(
     if (message.actor.chatType !== "private") {
       return [createOutbound(message.actor, msg(locale, "bindPrivateOnly"))];
     }
-    const record = bindCodes.get(code.trim().toUpperCase());
+    // Bugfix（安全）：旧实现不统计失败次数，绑定码可被同一发送者反复枚举。
+    // 按 botId + providerUserId 计数，窗口内失败达到阈值后直接拒绝，正确的绑定码也不再受理。
+    const attemptKey = bindAttemptLimiter.key(message.botId, message.actor.providerUserId);
+    const retryAfterMs = bindAttemptLimiter.retryAfterMs(attemptKey);
+    if (retryAfterMs > 0) {
+      return [
+        createOutbound(
+          message.actor,
+          msg(locale, "bindTooManyAttempts", { minutes: Math.ceil(retryAfterMs / 60_000) }),
+        ),
+      ];
+    }
+    const record = bindCodes.get(normalizeBindCode(code));
     if (!record || record.expiresAt <= Date.now() || record.botId !== message.botId) {
+      bindAttemptLimiter.recordFailure(attemptKey);
       return [createOutbound(message.actor, msg(locale, "bindCodeInvalid"))];
     }
     const config = await repo.readConfig();
@@ -4574,6 +4618,7 @@ export function createBotsService(
       bots: config.bots.map((item) => (item.id === nextBot.id ? nextBot : item)),
     });
     bindCodes.delete(record.code);
+    bindAttemptLimiter.reset(attemptKey);
     return [
       createOutbound(
         message.actor,
@@ -5395,7 +5440,8 @@ export function createBotsService(
       if (!bot) {
         throw new Error(`Bot not found: ${botId}`);
       }
-      const code = createCode();
+      // Bugfix（安全）：旧绑定码只有 24 bit（6 位十六进制），改为 65 bit 的易读 base32。
+      const code = createBindCodeValue();
       const expiresAt = Date.now() + (params.ttlMs ?? BOT_BIND_CODE_TTL_MS);
       const allowedWorkspaces = normalizeAllowedWorkspaces(
         params.allowedWorkspaces ?? [ALL_BOT_WORKSPACES],

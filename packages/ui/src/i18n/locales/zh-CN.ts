@@ -542,7 +542,7 @@ const zhCN: Record<string, string> = {
   "bots.setup.guide.webhook.bind.2":
     '请求体至少带上当前 botId、稳定的 userId、`chatType: "private"`，并把 text 设成 {command}。',
   "bots.setup.guide.webhook.bind.3":
-    "如果配置了 secret，请同时在请求头里带上 `x-zcode-bot-secret`；绑定成功后再回到这里完成设置。",
+    "请求头必须带上 secret（默认 `x-zcode-bot-secret`，或你配置的认证 Header），否则回调会被 401 拒绝；绑定成功后再回到这里完成设置。",
   "bots.setup.footer.choose": "选择一个已支持的渠道后继续。",
   "bots.setup.footer.create": "测试通过后才会进入绑定步骤。",
   "bots.setup.testSuccess": "连通性测试通过",
