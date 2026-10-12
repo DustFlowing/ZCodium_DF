@@ -597,7 +597,7 @@ const enUS: Record<string, string> = {
   "bots.setup.guide.webhook.bind.2":
     'The payload should at least include this botId, a stable userId, `chatType: "private"`, and set text to {command}.',
   "bots.setup.guide.webhook.bind.3":
-    "If the bot uses a secret, also send `x-zcode-bot-secret`; then return here after the bind succeeds.",
+    "Send the secret in a request header (`x-zcode-bot-secret` by default, or your configured auth header); callbacks without it are rejected with 401. Return here after the bind succeeds.",
   "bots.setup.footer.choose": "Choose a supported bot to continue.",
   "bots.setup.footer.create": "Connectivity must pass before binding.",
   "bots.setup.testSuccess": "Connectivity test passed",
