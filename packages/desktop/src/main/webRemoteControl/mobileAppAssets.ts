@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { extname, join, normalize, resolve } from "node:path";
+import { extname, join, normalize, resolve, sep } from "node:path";
 import type { WebRemoteControlLogger } from "./logger.js";
 
 /**
@@ -48,13 +48,27 @@ function contentTypeFor(filePath: string): string {
   return CONTENT_TYPES[extname(filePath).toLowerCase()] ?? "application/octet-stream";
 }
 
-/** 把请求路径收敛到静态根内，拒绝越界访问。 */
-function resolveStaticFilePath(root: string, urlPath: string): string | null {
+/** 解码请求路径；畸形百分号编码返回 null。 */
+function decodeRequestPath(urlPath: string): string | null {
   const [rawPath = "/"] = urlPath.split("?");
-  const decoded = decodeURIComponent(rawPath);
-  const relative = decoded === "/" ? "/mobile.html" : decoded;
-  const target = resolve(join(root, normalize(relative)));
-  if (!target.startsWith(resolve(root))) {
+  // 修复说明：畸形百分号编码（如 `GET /%`）会让 decodeURIComponent 抛 URIError，原先未捕获，
+  // lanEndpoint.handleHttp 的 `.then` 链没有 catch，请求会一直挂起；这里改为交给调用方回 400。
+  try {
+    return decodeURIComponent(rawPath);
+  } catch {
+    return null;
+  }
+}
+
+/** 把已解码的请求路径收敛到静态根内，拒绝越界访问。 */
+function resolveStaticFilePath(root: string, decodedPath: string): string | null {
+  const relative = decodedPath === "/" ? "/mobile.html" : decodedPath;
+  const resolvedRoot = resolve(root);
+  const target = resolve(join(resolvedRoot, normalize(relative)));
+  // 修复说明：原 `startsWith(root)` 会放行同前缀的兄弟目录（如 dist 与 dist-private），
+  // 改为要求以 root + 路径分隔符开头。
+  const rootPrefix = resolvedRoot.endsWith(sep) ? resolvedRoot : resolvedRoot + sep;
+  if (!target.startsWith(rootPrefix)) {
     return null;
   }
   return target;
@@ -78,10 +92,14 @@ export function createMobileAppStaticHandler(params: { logger: WebRemoteControlL
         contentType: "text/plain; charset=utf-8",
       };
     }
+    const decodedPath = decodeRequestPath(urlPath);
+    if (decodedPath === null) {
+      return { status: 400, body: "Bad request", contentType: "text/plain; charset=utf-8" };
+    }
     // SPA：未命中文件时回退 mobile.html（深链 /remote/task/xxx 不 404）。
     const candidates = [
-      resolveStaticFilePath(root, urlPath),
-      mobileDir ? resolveStaticFilePath(mobileDir, urlPath) : null,
+      resolveStaticFilePath(root, decodedPath),
+      mobileDir ? resolveStaticFilePath(mobileDir, decodedPath) : null,
       mobileHtmlPath,
     ].filter((value): value is string => Boolean(value));
     for (const candidate of candidates) {
